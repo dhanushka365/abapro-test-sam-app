@@ -1,0 +1,101 @@
+@startuml Architecture - AWS Infrastructure
+!define AWSPuml https://raw.githubusercontent.com/awslabs/aws-icons-for-plantuml/v18.0/dist
+!include <awslib/AWSCommon>
+!include <awslib/AWSSimplified.puml>
+
+skinparam backgroundColor #FAFAFA
+skinparam rectangle {
+    BackgroundColor #E8F4FD
+    BorderColor #2196F3
+    RoundCorner 12
+}
+skinparam component {
+    BackgroundColor #FFF9C4
+    BorderColor #F57F17
+}
+skinparam database {
+    BackgroundColor #E8F5E9
+    BorderColor #388E3C
+}
+skinparam cloud {
+    BackgroundColor #FCE4EC
+    BorderColor #C62828
+}
+skinparam note {
+    BackgroundColor #FFF3E0
+    BorderColor #E65100
+}
+
+title Users API — AWS Architecture Overview
+
+actor "Client\n(Browser / Mobile)" as client
+
+rectangle "AWS Cloud" {
+
+    rectangle "API Gateway\n(REST — prod stage)" as apigw #E3F2FD {
+        component "GET /users"              as r1
+        component "GET /users/{userid}"     as r2
+        component "POST /users"             as r3  #FFECB3
+        component "POST /users/verify"      as r4  #FFECB3
+        component "POST /users/login"       as r5  #FFECB3
+        component "PUT /users/{userid}"     as r6
+        component "DELETE /users/{userid}"  as r7
+    }
+
+    rectangle "Cognito Authorizer" as cognito_auth #EDE7F6 {
+        component "JWT Validation\n(Authorization header)" as jwt
+    }
+
+    rectangle "Lambda Function\nusers.lambda_handler\n(Python 3.12, 128 MB, 30s)" as lambda #FFF9C4 {
+        component "Route Dispatcher"  as dispatcher
+        component "Business Logic"    as logic
+        component "Error Handler"     as errhandler
+    }
+
+    rectangle "Amazon Cognito\nUser Pool" as cognito #E8EAF6 {
+        component "sign_up"           as cog_signup
+        component "confirm_sign_up"   as cog_verify
+        component "initiate_auth"     as cog_login
+        component "admin_delete_user" as cog_delete
+    }
+
+    database "DynamoDB\nUsers Table\n(PK: userid)" as ddb #E8F5E9
+
+    rectangle "CloudWatch" as cw #FBE9E7 {
+        component "Custom Metrics\n(UsersAPI namespace)"  as cw_metrics
+        component "Lambda Metrics\n(Errors / Duration)"   as cw_lambda
+        component "Alarms (4)"                            as cw_alarms
+        component "Dashboard"                             as cw_dash
+    }
+
+    rectangle "SNS Topic\n(Alarm Notifications)" as sns #F3E5F5
+}
+
+client  --> apigw          : HTTPS requests
+apigw   --> cognito_auth   : Protected routes\n(all except POST /users,\nPOST /users/verify,\nPOST /users/login)
+cognito_auth --> lambda    : Verified JWT + claims
+apigw   --> lambda         : Public routes (no auth)
+
+lambda  --> ddb            : CRUD (scan / get_item /\nput_item / delete_item /\nupdate_item)
+lambda  --> cognito        : sign_up / confirm_sign_up\n/ initiate_auth\n/ admin_delete_user
+lambda  --> cw_metrics     : put_metric_data
+
+cw_lambda --> cw_alarms    : Errors > 0 in 5 min\np99 Duration > 10 s
+cw_metrics --> cw_alarms   : CognitoSignUpError ≥ 3\nDynamoDBWriteError ≥ 1
+cw_alarms --> sns          : AlarmActions / OKActions
+
+note right of apigw
+  CORS enabled:
+  GET, POST, PUT,
+  DELETE, OPTIONS
+end note
+
+note right of lambda
+  Env vars:
+  USERS_TABLE
+  USER_POOL_ID
+  USER_POOL_CLIENT_ID
+  STACK_NAME
+end note
+
+@enduml

@@ -1,0 +1,76 @@
+@startuml Sequence - POST /users (Register)
+skinparam backgroundColor #FAFAFA
+skinparam sequence {
+    ArrowColor #1565C0
+    LifeLineBorderColor #1565C0
+    LifeLineBackgroundColor #E3F2FD
+    ParticipantBackgroundColor #E3F2FD
+    ParticipantBorderColor #1565C0
+    ActorBackgroundColor #FFF9C4
+    ActorBorderColor #F57F17
+    BoxBackgroundColor #F5F5F5
+    BoxBorderColor #BDBDBD
+    NoteBackgroundColor #FFF8E1
+    NoteBorderColor #F9A825
+}
+skinparam shadowing false
+
+title POST /users — User Registration Sequence
+
+actor  "Client"              as client
+box "AWS" #F5F5F5
+    participant "API Gateway"    as apigw  #E8EAF6
+    participant "Lambda"         as lambda #FFF9C4
+    participant "Cognito"        as cog    #EDE7F6
+    participant "DynamoDB"       as ddb    #E8F5E9
+    participant "CloudWatch"     as cw     #FBE9E7
+end box
+
+client -> apigw  : POST /users\n{ email, password, ...profile }
+note right : No Auth required\n(Authorizer: NONE)
+
+apigw  -> lambda : Invoke lambda_handler\n(route: POST /users)
+
+lambda -> lambda : Validate email & password present
+
+alt Missing email or password
+    lambda -> cw   : put_metric(ValidationError)
+    lambda -> client : 400 — email and password are required
+end
+
+lambda -> cog : sign_up(ClientId, Username=email,\n Password, UserAttributes)
+
+alt Cognito signup fails
+    cog    --> lambda : ClientError (e.g. UsernameExistsException)
+    lambda -> cw      : put_metric(CognitoSignUpError, ErrorCode)
+    lambda --> client : 409 / 400 — error message
+end
+
+cog    --> lambda : { UserSub: <cognito_sub> }
+
+lambda -> lambda : Remove password from request_json\nSet userid = cognito_sub\nSet created_by, timestamp
+
+lambda -> ddb : put_item(Item=user_profile)
+
+alt DynamoDB write fails
+    ddb    --> lambda : Exception
+    lambda -> cw      : put_metric(DynamoDBWriteError)
+    lambda -> cog     : admin_delete_user (ROLLBACK)
+    alt Rollback succeeds
+        cog --> lambda : OK
+        lambda -> cw   : (no rollback error metric)
+    else Rollback fails
+        cog --> lambda : ClientError
+        lambda -> cw   : put_metric(CognitoRollbackError)
+    end
+    lambda --> client : 500 — User registration failed
+end
+
+ddb    --> lambda : OK
+lambda -> cw     : put_metric(UserRegistered)
+lambda --> apigw : 201 + { userid, email, message:\n"Please check your email to confirm" }
+apigw  --> client : 201 Created
+
+note over cog : Cognito sends\nverification email\nasynchronously
+
+@enduml

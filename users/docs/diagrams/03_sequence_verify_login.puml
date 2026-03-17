@@ -1,0 +1,89 @@
+@startuml Sequence - POST /users/verify & POST /users/login
+skinparam backgroundColor #FAFAFA
+skinparam sequence {
+    ArrowColor #1565C0
+    LifeLineBorderColor #1565C0
+    LifeLineBackgroundColor #E3F2FD
+    ParticipantBackgroundColor #E3F2FD
+    ParticipantBorderColor #1565C0
+    ActorBackgroundColor #FFF9C4
+    ActorBorderColor #F57F17
+    BoxBackgroundColor #F5F5F5
+    BoxBorderColor #BDBDBD
+    NoteBackgroundColor #FFF8E1
+    NoteBorderColor #F9A825
+}
+skinparam shadowing false
+
+title POST /users/verify — Email Verification  &  POST /users/login — Login
+
+actor "Client" as client
+
+box "AWS" #F5F5F5
+    participant "API Gateway" as apigw  #E8EAF6
+    participant "Lambda"      as lambda #FFF9C4
+    participant "Cognito"     as cog    #EDE7F6
+    participant "DynamoDB"    as ddb    #E8F5E9
+    participant "CloudWatch"  as cw     #FBE9E7
+end box
+
+== Email Verification (POST /users/verify) ==
+
+client -> apigw  : POST /users/verify\n{ email, code }
+note right: No Auth required
+apigw  -> lambda : Invoke (route: POST /users/verify)
+
+lambda -> lambda : Validate email & code present
+alt Missing fields
+    lambda -> cw    : put_metric(ValidationError)
+    lambda --> client : 400
+end
+
+lambda -> cog : confirm_sign_up(ClientId, Username=email, ConfirmationCode=code)
+
+alt Cognito error
+    cog    --> lambda : ClientError (CodeMismatch / Expired /\nNotAuthorized / UserNotFound)
+    lambda -> cw      : put_metric(EmailVerifyError, ErrorCode)
+    lambda --> client : 400 — error message
+end
+
+cog    --> lambda : OK
+lambda -> ddb    : scan(FilterExpression: email = :e)
+ddb    --> lambda : Items[]
+lambda -> ddb    : update_item(userid,\nSET email_verified=true,\nverified_at=now)
+ddb    --> lambda : OK
+lambda -> cw     : put_metric(EmailVerified)
+lambda --> client : 200 — "Email verified successfully. You can now log in."
+
+== Login (POST /users/login) ==
+
+client -> apigw  : POST /users/login\n{ email, password }
+note right: No Auth required
+apigw  -> lambda : Invoke (route: POST /users/login)
+
+lambda -> lambda : Validate email & password present
+alt Missing fields
+    lambda -> cw    : put_metric(ValidationError)
+    lambda --> client : 400
+end
+
+lambda -> cog : initiate_auth(ClientId,\nAuthFlow=USER_PASSWORD_AUTH,\nUSERNAME=email, PASSWORD=password)
+
+alt Auth error
+    cog    --> lambda : ClientError (NotAuthorized /\nUserNotConfirmed /\nUserNotFound /\nPasswordResetRequired)
+    lambda -> cw      : put_metric(LoginError, ErrorCode)
+    lambda --> client : 401 — error message
+end
+
+cog    --> lambda : AuthenticationResult\n{ IdToken, AccessToken,\nRefreshToken, ExpiresIn, TokenType }
+lambda -> cw     : put_metric(UserLogin)
+lambda --> client : 200 — { IdToken, AccessToken,\nRefreshToken, ExpiresIn, TokenType }
+
+note over client
+  Client stores tokens.
+  Use IdToken as
+  Authorization header
+  for protected routes.
+end note
+
+@enduml

@@ -1,0 +1,163 @@
+@startuml Activity - lambda_handler Flow
+skinparam backgroundColor #FAFAFA
+skinparam activity {
+    BackgroundColor #E3F2FD
+    BorderColor #1565C0
+    DiamondBackgroundColor #FFF9C4
+    DiamondBorderColor #F57F17
+    ArrowColor #1565C0
+    StartColor #1565C0
+    EndColor #B71C1C
+    FontSize 12
+}
+skinparam note {
+    BackgroundColor #FFF8E1
+    BorderColor #F9A825
+}
+skinparam shadowing false
+
+title lambda_handler — Full Activity / Flow Diagram
+
+start
+
+:Receive API Gateway event;
+:Build route_key = httpMethod + resource;
+:Log REQUEST event;
+:Set defaults: status=400,\nbody="Unsupported route";
+
+:get_caller_sub(event) → caller_sub;
+
+note right
+  Extracts Cognito sub
+  from JWT claims.
+  Returns None if missing.
+end note
+
+fork
+    :route_key == "GET /users"?;
+    if (yes) then (yes)
+        :ddbTable.scan();
+        :status = 200, body = Items[];
+        :put_metric(GetUsers);
+    endif
+fork again
+    :route_key == "GET /users/{userid}"?;
+    if (yes) then (yes)
+        :ddbTable.get_item(userid);
+        :status = 200, body = Item or {};
+        :put_metric(GetUserById);
+    endif
+fork again
+    :route_key == "DELETE /users/{userid}"?;
+    if (yes) then (yes)
+        if (caller_sub != userid) then (forbidden)
+            :status = 403;
+            :put_metric(AuthorizationFailure);
+        else (allowed)
+            :ddbTable.delete_item(userid);
+            :status = 200, body = {};
+            :put_metric(DeleteUser);
+        endif
+    endif
+fork again
+    :route_key == "POST /users"?;
+    if (yes) then (yes)
+        if (missing email or password) then (yes)
+            :status = 400;
+            :put_metric(ValidationError);
+        else (valid)
+            :cognito.sign_up(email, password);
+            if (Cognito error?) then (yes)
+                :put_metric(CognitoSignUpError);
+                :return 409/400 early;
+                stop
+            else (success)
+                :cognito_sub = UserSub;
+                :Remove password from body;
+                :Add userid, created_by, timestamp;
+                :ddbTable.put_item(user_profile);
+                if (DynamoDB error?) then (yes)
+                    :put_metric(DynamoDBWriteError);
+                    :cognito.admin_delete_user (ROLLBACK);
+                    if (Rollback error?) then (yes)
+                        :put_metric(CognitoRollbackError);
+                    endif
+                    :status = 500;
+                else (success)
+                    :status = 201;
+                    :put_metric(UserRegistered);
+                endif
+            endif
+        endif
+    endif
+fork again
+    :route_key == "POST /users/verify"?;
+    if (yes) then (yes)
+        if (missing email or code) then (yes)
+            :status = 400;
+            :put_metric(ValidationError);
+        else (valid)
+            :cognito.confirm_sign_up(email, code);
+            if (Cognito error?) then (yes)
+                :put_metric(EmailVerifyError);
+                :status = 400;
+            else (success)
+                :Scan DynamoDB for email;
+                :update_item(email_verified=true);
+                :status = 200;
+                :put_metric(EmailVerified);
+            endif
+        endif
+    endif
+fork again
+    :route_key == "POST /users/login"?;
+    if (yes) then (yes)
+        if (missing email or password) then (yes)
+            :status = 400;
+            :put_metric(ValidationError);
+        else (valid)
+            :cognito.initiate_auth(email, password);
+            if (Auth error?) then (yes)
+                :put_metric(LoginError);
+                :status = 401;
+            else (success)
+                :body = { Tokens };
+                :status = 200;
+                :put_metric(UserLogin);
+            endif
+        endif
+    endif
+fork again
+    :route_key == "PUT /users/{userid}"?;
+    if (yes) then (yes)
+        if (caller_sub != userid) then (forbidden)
+            :status = 403;
+            :put_metric(AuthorizationFailure);
+        else (allowed)
+            :Add timestamp, userid to body;
+            :ddbTable.put_item(updated_profile);
+            :status = 200;
+            :put_metric(UpdateUser);
+        endif
+    endif
+end fork
+
+note right
+  All route checks
+  are independent if-blocks;
+  only the matching one
+  sets status/body.
+end note
+
+if (Unhandled exception?) then (yes)
+    :status = 400;
+    :Log UNHANDLED_ERROR;
+    :put_metric(UnhandledError);
+endif
+
+:Log RESPONSE (route, statusCode);
+:Return { statusCode, body, headers };
+
+stop
+
+@enduml

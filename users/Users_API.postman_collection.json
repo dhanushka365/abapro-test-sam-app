@@ -1,0 +1,193 @@
+{
+	"info": {
+		"_postman_id": "users-api-collection",
+		"name": "Users API",
+		"description": "Complete collection of Users API endpoints with Cognito authentication",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Get All Users",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{auth_token}}",
+						"type": "text"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"url": {
+					"raw": "{{api_endpoint}}/users",
+					"host": [
+						"{{api_endpoint}}"
+					],
+					"path": [
+						"users"
+					]
+				},
+				"description": "Retrieve all users from the database"
+			},
+			"response": []
+		},
+		{
+			"name": "Get User by ID",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{auth_token}}",
+						"type": "text"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"url": {
+					"raw": "{{api_endpoint}}/users/{{userid}}",
+					"host": [
+						"{{api_endpoint}}"
+					],
+					"path": [
+						"users",
+						"{{userid}}"
+					]
+				},
+				"description": "Retrieve a specific user by their userid"
+			},
+			"response": []
+		},
+		{
+			"name": "Create User",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{auth_token}}",
+						"type": "text"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"name\": \"John Doe\",\n    \"email\": \"john.doe@example.com\"\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{api_endpoint}}/users",
+					"host": [
+						"{{api_endpoint}}"
+					],
+					"path": [
+						"users"
+					]
+				},
+				"description": "Create a new user. The userid will be automatically set to the Cognito sub if authenticated."
+			},
+			"response": []
+		},
+		{
+			"name": "Update User by ID",
+			"request": {
+				"method": "PUT",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{auth_token}}",
+						"type": "text"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"name\": \"John Doe Updated\",\n    \"email\": \"john.doe.updated@example.com\"\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{api_endpoint}}/users/{{userid}}",
+					"host": [
+						"{{api_endpoint}}"
+					],
+					"path": [
+						"users",
+						"{{userid}}"
+					]
+				},
+				"description": "Update a user by ID. Only the owner (userid matching Cognito sub) can update their own record."
+			},
+			"response": []
+		},
+		{
+			"name": "Delete User by ID",
+			"request": {
+				"method": "DELETE",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{auth_token}}",
+						"type": "text"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"url": {
+					"raw": "{{api_endpoint}}/users/{{userid}}",
+					"host": [
+						"{{api_endpoint}}"
+					],
+					"path": [
+						"users",
+						"{{userid}}"
+					]
+				},
+				"description": "Delete a user by ID. Only the owner (userid matching Cognito sub) can delete their own record."
+			},
+			"response": []
+		}
+	],
+	"variable": [
+		{
+			"key": "api_endpoint",
+			"value": "https://your-api-id.execute-api.your-region.amazonaws.com/prod",
+			"type": "string"
+		},
+		{
+			"key": "auth_token",
+			"value": "your-cognito-jwt-token-here",
+			"type": "string"
+		},
+		{
+			"key": "userid",
+			"value": "f8216640-91a2-11eb-8ab9-57aa454facef",
+			"type": "string"
+		}
+	]
+}

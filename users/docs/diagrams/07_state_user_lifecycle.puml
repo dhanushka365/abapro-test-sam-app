@@ -1,0 +1,64 @@
+@startuml State - User Lifecycle
+skinparam backgroundColor #FAFAFA
+skinparam state {
+    BackgroundColor #E3F2FD
+    BorderColor #1565C0
+    ArrowColor #1565C0
+    StartColor #1565C0
+    EndColor #B71C1C
+    FontSize 12
+}
+skinparam note {
+    BackgroundColor #FFF8E1
+    BorderColor #F9A825
+}
+skinparam shadowing false
+
+title User Account — Lifecycle State Diagram
+
+[*] --> Unregistered : (initial state)
+
+Unregistered --> PendingVerification : POST /users\n(Cognito sign_up + DynamoDB put_item)\nstatus 201
+
+PendingVerification --> PendingVerification : POST /users/verify\n(wrong code / expired code)\nstatus 400
+
+PendingVerification --> Verified : POST /users/verify\n(confirm_sign_up OK)\nDynamoDB: email_verified=true\nstatus 200
+
+PendingVerification --> Unregistered : DynamoDB write error\n(Cognito admin_delete_user ROLLBACK)\nstatus 500
+
+Verified --> LoggedIn : POST /users/login\n(initiate_auth OK)\nstatus 200 + tokens
+
+LoggedIn --> LoggedIn : GET /users\nGET /users/{userid}\nstatus 200
+
+LoggedIn --> LoggedIn : PUT /users/{userid}\n(owner only)\nstatus 200
+
+LoggedIn --> Forbidden : PUT or DELETE\nby another user\nstatus 403
+
+Forbidden --> LoggedIn : (returns to normal flow)
+
+LoggedIn --> Deleted : DELETE /users/{userid}\n(owner only)\nstatus 200
+
+LoggedIn --> Unregistered : token expired /\nno longer authenticated
+
+Deleted --> [*]
+
+note right of PendingVerification
+  Cognito sends a
+  verification email
+  automatically after sign_up
+end note
+
+note right of LoggedIn
+  Tokens:
+  IdToken (1 hour)
+  AccessToken (1 hour)
+  RefreshToken (30 days)
+end note
+
+note right of Forbidden
+  Ownership rule:
+  caller_sub must equal userid
+  for PUT and DELETE
+end note
+
+@enduml

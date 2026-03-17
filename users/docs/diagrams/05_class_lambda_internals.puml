@@ -1,0 +1,95 @@
+@startuml Class - Lambda Handler Internal Structure
+skinparam backgroundColor #FAFAFA
+skinparam class {
+    BackgroundColor #E3F2FD
+    BorderColor #1565C0
+    ArrowColor #1565C0
+    HeaderBackgroundColor #1565C0
+    HeaderFontColor #FFFFFF
+    FontSize 12
+}
+skinparam note {
+    BackgroundColor #FFF8E1
+    BorderColor #F9A825
+}
+skinparam shadowing false
+
+title Lambda Handler — Internal Class & Component Structure
+
+package "users.py" #F5F5F5 {
+
+    class "lambda_handler(event, context)" as handler << (F,#FFF9C4) Function >> {
+        + route_key : str
+        + status_code : int
+        + response_body : dict
+        + headers : dict
+        --
+        Dispatches to route handlers
+        based on httpMethod + resource
+    }
+
+    class "get_caller_sub(event)" as get_caller << (F,#FFF9C4) Function >> {
+        + event : dict
+        --
+        returns sub : str | None
+        Extracts Cognito JWT sub
+        from requestContext.authorizer.claims
+    }
+
+    class "put_metric(metric_name, ...)" as put_metric_fn << (F,#FFF9C4) Function >> {
+        + metric_name : str
+        + value : int = 1
+        + unit : str = "Count"
+        + **dimensions : dict
+        --
+        Publishes to CloudWatch
+        Namespace: {STACK_NAME}/UsersAPI
+        Silently logs on failure
+    }
+
+    class "RouteHandlers" as routes << (R,#E8F5E9) Routes >> {
+        GET /users             : scan DynamoDB
+        GET /users/{userid}    : get_item DynamoDB
+        POST /users            : sign_up Cognito\n+ put_item DynamoDB\n(with rollback)
+        POST /users/verify     : confirm_sign_up Cognito\n+ update_item DynamoDB
+        POST /users/login      : initiate_auth Cognito
+        PUT /users/{userid}    : ownership check\n+ put_item DynamoDB
+        DELETE /users/{userid} : ownership check\n+ delete_item DynamoDB
+    }
+
+    class "AWS Clients" as aws_clients << (C,#EDE7F6) Config >> {
+        + dynamodb  : boto3.resource("dynamodb")
+        + ddbTable  : Table(USERS_TABLE)
+        + cognito   : boto3.client("cognito-idp")
+        + cw_client : boto3.client("cloudwatch")
+    }
+
+    class "Environment Variables" as env << (E,#FCE4EC) Env >> {
+        + USERS_TABLE        : str
+        + USER_POOL_CLIENT_ID : str
+        + USER_POOL_ID       : str
+        + STACK_NAME         : str
+    }
+}
+
+handler --> get_caller    : calls to extract\ncaller identity
+handler --> routes        : dispatches by\nroute_key
+handler --> put_metric_fn : emits metrics
+routes  --> aws_clients   : uses DynamoDB\nand Cognito clients
+put_metric_fn --> aws_clients : uses cw_client
+aws_clients --> env       : configured from
+
+note bottom of routes
+  Authorization:
+  PUT + DELETE check
+  caller_sub == userid
+  (owner-only operations)
+end note
+
+note bottom of handler
+  Global exception handler:
+  catches all unhandled errors,
+  returns 400 + put_metric(UnhandledError)
+end note
+
+@enduml

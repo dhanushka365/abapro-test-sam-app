@@ -1,0 +1,90 @@
+@startuml Component - CloudWatch Observability
+skinparam backgroundColor #FAFAFA
+skinparam component {
+    BackgroundColor #E3F2FD
+    BorderColor #1565C0
+    FontSize 12
+}
+skinparam database {
+    BackgroundColor #E8F5E9
+    BorderColor #388E3C
+}
+skinparam rectangle {
+    BackgroundColor #FFFDE7
+    BorderColor #F9A825
+    RoundCorner 10
+}
+skinparam note {
+    BackgroundColor #FFF8E1
+    BorderColor #F9A825
+}
+skinparam shadowing false
+
+title Observability — CloudWatch Metrics, Alarms & Dashboard
+
+rectangle "Lambda (users.py)" as lambda #FFF9C4 {
+    component "Successful Operations" as ops_ok {
+        [GetUsers]
+        [GetUserById]
+        [UserRegistered]
+        [EmailVerified]
+        [UserLogin]
+        [UpdateUser]
+        [DeleteUser]
+    }
+    component "Error / Warning Metrics" as ops_err {
+        [ValidationError]
+        [CognitoSignUpError]
+        [DynamoDBWriteError]
+        [CognitoRollbackError]
+        [EmailVerifyError]
+        [LoginError]
+        [AuthorizationFailure]
+        [UnhandledError]
+    }
+}
+
+rectangle "AWS/Lambda (built-in metrics)" as aws_lambda_metrics #E8EAF6 {
+    [Invocations]
+    [Errors]
+    [Duration]
+}
+
+rectangle "CloudWatch Alarms" as alarms #FCE4EC {
+    [LambdaErrorAlarm\nErrors >= 1 in 5 min]
+    [LambdaLatencyAlarm\np99 Duration >= 10s]
+    [CognitoSignUpErrorAlarm\nCognitoSignUpError >= 3 in 5 min]
+    [DynamoDBWriteErrorAlarm\nDynamoDBWriteError >= 1 in 5 min]
+}
+
+rectangle "CloudWatch Dashboard\n(4 widgets)" as dashboard #E8F5E9 {
+    [Lambda Invocations & Errors]
+    [Lambda Duration p50/p99]
+    [API Operations (custom)]
+    [Errors & Auth Failures (custom)]
+}
+
+component "SNS Topic\n(Alarm Notifications)" as sns #EDE7F6
+
+ops_ok  --> dashboard   : {STACK_NAME}/UsersAPI\nnamespace
+ops_err --> dashboard   : {STACK_NAME}/UsersAPI\nnamespace
+ops_err --> alarms      : CognitoSignUpError\nDynamoDBWriteError
+
+aws_lambda_metrics --> alarms   : Errors, Duration
+aws_lambda_metrics --> dashboard
+
+alarms --> sns : AlarmActions\n& OKActions
+
+note bottom of sns
+  Subscribe operator email
+  to this SNS topic to
+  receive alarm notifications
+end note
+
+note right of alarms
+  TreatMissingData: notBreaching
+  EvaluationPeriods: 1
+  Period: 300s (5 min)
+end note
+
+@enduml

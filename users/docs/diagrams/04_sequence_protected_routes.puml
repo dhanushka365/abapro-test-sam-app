@@ -1,0 +1,83 @@
+@startuml Sequence - Protected Routes (GET, PUT, DELETE)
+skinparam backgroundColor #FAFAFA
+skinparam sequence {
+    ArrowColor #1565C0
+    LifeLineBorderColor #1565C0
+    LifeLineBackgroundColor #E3F2FD
+    ParticipantBackgroundColor #E3F2FD
+    ParticipantBorderColor #1565C0
+    ActorBackgroundColor #FFF9C4
+    ActorBorderColor #F57F17
+    BoxBackgroundColor #F5F5F5
+    BoxBorderColor #BDBDBD
+    NoteBackgroundColor #FFF8E1
+    NoteBorderColor #F9A825
+}
+skinparam shadowing false
+
+title Protected Routes: GET /users, GET /users/{userid},\nPUT /users/{userid}, DELETE /users/{userid}
+
+actor "Client" as client
+
+box "AWS" #F5F5F5
+    participant "API Gateway +\nCognito Authorizer" as apigw  #E8EAF6
+    participant "Lambda"                             as lambda #FFF9C4
+    participant "DynamoDB"                           as ddb    #E8F5E9
+    participant "CloudWatch"                         as cw     #FBE9E7
+end box
+
+note over apigw : All routes below require\nAuthorization: <IdToken>
+
+== GET /users — List All Users ==
+
+client -> apigw  : GET /users\nAuthorization: <IdToken>
+apigw  -> apigw  : Validate JWT via Cognito User Pool
+apigw  -> lambda : Invoke (route: GET /users)\n+ claims in requestContext
+lambda -> ddb    : scan(Select=ALL_ATTRIBUTES)
+ddb    --> lambda : { Items: [...] }
+lambda -> cw     : put_metric(GetUsers)
+lambda --> client : 200 — [ user1, user2, ... ]
+
+== GET /users/{userid} — Get User By ID ==
+
+client -> apigw  : GET /users/{userid}\nAuthorization: <IdToken>
+apigw  -> lambda : Invoke (route: GET /users/{userid})
+lambda -> ddb    : get_item(Key={userid})
+ddb    --> lambda : { Item: {...} } or {}
+lambda -> cw     : put_metric(GetUserById)
+lambda --> client : 200 — user object (or {})
+
+== PUT /users/{userid} — Update User ==
+
+client -> apigw  : PUT /users/{userid}\nAuthorization: <IdToken>\n{ ...updated fields }
+apigw  -> lambda : Invoke (route: PUT /users/{userid})\n+ caller_sub from claims
+
+lambda -> lambda : get_caller_sub(event)
+alt caller_sub != userid (ownership check)
+    lambda -> cw    : put_metric(AuthorizationFailure)
+    lambda --> client : 403 Forbidden
+end
+
+lambda -> lambda : Add timestamp, userid to body
+lambda -> ddb    : put_item(Item=updated_profile)
+ddb    --> lambda : OK
+lambda -> cw     : put_metric(UpdateUser)
+lambda --> client : 200 — updated user object
+
+== DELETE /users/{userid} — Delete User ==
+
+client -> apigw  : DELETE /users/{userid}\nAuthorization: <IdToken>
+apigw  -> lambda : Invoke (route: DELETE /users/{userid})\n+ caller_sub from claims
+
+lambda -> lambda : get_caller_sub(event)
+alt caller_sub != userid (ownership check)
+    lambda -> cw    : put_metric(AuthorizationFailure)
+    lambda --> client : 403 Forbidden
+end
+
+lambda -> ddb    : delete_item(Key={userid})
+ddb    --> lambda : OK
+lambda -> cw     : put_metric(DeleteUser)
+lambda --> client : 200 — {}
+
+@enduml
