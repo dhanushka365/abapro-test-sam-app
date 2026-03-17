@@ -237,8 +237,7 @@ class TestPostUser:
         assert resp['statusCode'] == 500
         assert 'database error' in json.loads(resp['body'])['Message']
         # Rollback: Cognito user must be deleted
-        mock_cognito.admin_delete_user.assert_called_once_with(
-            UserPoolId='us-east-1_testPool',
+        mock_cognito.admin_delete_user.assert_called_once_with(            UserPoolId='us-east-1_testPool',
             Username='alice@example.com'
         )
 
@@ -258,6 +257,325 @@ class TestPostUser:
         # Still returns 500 to the client even though rollback failed
         assert resp['statusCode'] == 500
         assert 'database error' in json.loads(resp['body'])['Message']
+
+
+# ── POST /users/verify ────────────────────────────────────────────────────────
+
+class TestVerifyUser:
+
+    def test_missing_email_returns_400(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        resp = lambda_handler(make_event('POST', '/users/verify', body={'code': '123456'}), {})
+        assert resp['statusCode'] == 400
+        assert 'email and code are required' in json.loads(resp['body'])['Message']
+        mock_cognito.confirm_sign_up.assert_not_called()
+
+    def test_missing_code_returns_400(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        resp = lambda_handler(make_event('POST', '/users/verify', body={'email': 'alice@example.com'}), {})
+        assert resp['statusCode'] == 400
+        assert 'email and code are required' in json.loads(resp['body'])['Message']
+        mock_cognito.confirm_sign_up.assert_not_called()
+
+    def test_successful_verification_returns_200(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        mock_cognito.confirm_sign_up.return_value = {}
+        mock_ddb_table.scan.return_value = {'Items': [{'userid': 'sub-abc', 'email': 'alice@example.com'}]}
+        mock_ddb_table.update_item.return_value = {}
+        resp = lambda_handler(make_event('POST', '/users/verify', body={
+            'email': 'alice@example.com', 'code': '123456'
+        }), {})
+        assert resp['statusCode'] == 200
+        assert 'verified successfully' in json.loads(resp['body'])['Message']
+        mock_cognito.confirm_sign_up.assert_called_once_with(
+            ClientId='test-client-id',
+            Username='alice@example.com',
+            ConfirmationCode='123456'
+        )
+
+    def test_successful_verification_updates_ddb(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        mock_cognito.confirm_sign_up.return_value = {}
+        mock_ddb_table.scan.return_value = {'Items': [{'userid': 'sub-abc', 'email': 'alice@example.com'}]}
+        mock_ddb_table.update_item.return_value = {}
+        lambda_handler(make_event('POST', '/users/verify', body={
+            'email': 'alice@example.com', 'code': '123456'
+        }), {})
+        mock_ddb_table.update_item.assert_called_once()
+        call_kwargs = mock_ddb_table.update_item.call_args[1]
+        assert call_kwargs['Key'] == {'userid': 'sub-abc'}
+        assert ':v' in call_kwargs['ExpressionAttributeValues']
+        assert call_kwargs['ExpressionAttributeValues'][':v'] is True
+
+    def test_verification_skips_ddb_update_when_user_not_found(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        mock_cognito.confirm_sign_up.return_value = {}
+        mock_ddb_table.scan.return_value = {'Items': []}
+        resp = lambda_handler(make_event('POST', '/users/verify', body={
+            'email': 'unknown@example.com', 'code': '123456'
+        }), {})
+        assert resp['statusCode'] == 200
+        mock_ddb_table.update_item.assert_not_called()
+
+    def test_code_mismatch_returns_400(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.confirm_sign_up.side_effect = ClientError(
+            {'Error': {'Code': 'CodeMismatchException', 'Message': 'Invalid code'}},
+            'ConfirmSignUp'
+        )
+        resp = lambda_handler(make_event('POST', '/users/verify', body={
+            'email': 'alice@example.com', 'code': '000000'
+        }), {})
+        assert resp['statusCode'] == 400
+        assert 'Invalid verification code' in json.loads(resp['body'])['Message']
+        assert json.loads(resp['body'])['ErrorCode'] == 'CodeMismatchException'
+
+    def test_expired_code_returns_400(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.confirm_sign_up.side_effect = ClientError(
+            {'Error': {'Code': 'ExpiredCodeException', 'Message': 'Code expired'}},
+            'ConfirmSignUp'
+        )
+        resp = lambda_handler(make_event('POST', '/users/verify', body={
+            'email': 'alice@example.com', 'code': '123456'
+        }), {})
+        assert resp['statusCode'] == 400
+        assert 'expired' in json.loads(resp['body'])['Message'].lower()
+
+    def test_already_confirmed_returns_400(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.confirm_sign_up.side_effect = ClientError(
+            {'Error': {'Code': 'NotAuthorizedException', 'Message': 'Already confirmed'}},
+            'ConfirmSignUp'
+        )
+        resp = lambda_handler(make_event('POST', '/users/verify', body={
+            'email': 'alice@example.com', 'code': '123456'
+        }), {})
+        assert resp['statusCode'] == 400
+        assert 'already confirmed' in json.loads(resp['body'])['Message'].lower()
+
+    def test_user_not_found_returns_400(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.confirm_sign_up.side_effect = ClientError(
+            {'Error': {'Code': 'UserNotFoundException', 'Message': 'User not found'}},
+            'ConfirmSignUp'
+        )
+        resp = lambda_handler(make_event('POST', '/users/verify', body={
+            'email': 'ghost@example.com', 'code': '123456'
+        }), {})
+        assert resp['statusCode'] == 400
+        assert 'No account found' in json.loads(resp['body'])['Message']
+
+    def test_verify_publishes_email_verified_metric(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        mock_cognito.confirm_sign_up.return_value = {}
+        mock_ddb_table.scan.return_value = {'Items': []}
+        lambda_handler(make_event('POST', '/users/verify', body={
+            'email': 'alice@example.com', 'code': '123456'
+        }), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'EmailVerified' in metric_names
+
+    def test_verify_error_publishes_email_verify_error_metric(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.confirm_sign_up.side_effect = ClientError(
+            {'Error': {'Code': 'CodeMismatchException', 'Message': 'Bad code'}},
+            'ConfirmSignUp'
+        )
+        lambda_handler(make_event('POST', '/users/verify', body={
+            'email': 'alice@example.com', 'code': '000000'
+        }), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'EmailVerifyError' in metric_names
+
+    def test_validation_failure_publishes_validation_error_metric(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        lambda_handler(make_event('POST', '/users/verify', body={'email': 'alice@example.com'}), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'ValidationError' in metric_names
+
+
+# ── POST /users/login ─────────────────────────────────────────────────────────
+
+class TestLoginUser:
+
+    def test_missing_email_returns_400(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        resp = lambda_handler(make_event('POST', '/users/login', body={'password': 'Pass123!'}), {})
+        assert resp['statusCode'] == 400
+        assert 'email and password are required' in json.loads(resp['body'])['Message']
+        mock_cognito.initiate_auth.assert_not_called()
+
+    def test_missing_password_returns_400(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        resp = lambda_handler(make_event('POST', '/users/login', body={'email': 'alice@example.com'}), {})
+        assert resp['statusCode'] == 400
+        assert 'email and password are required' in json.loads(resp['body'])['Message']
+        mock_cognito.initiate_auth.assert_not_called()
+
+    def test_successful_login_returns_200_with_tokens(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        mock_cognito.initiate_auth.return_value = {
+            'AuthenticationResult': {
+                'IdToken':      'id-token-abc',
+                'AccessToken':  'access-token-abc',
+                'RefreshToken': 'refresh-token-abc',
+                'ExpiresIn':    3600,
+                'TokenType':    'Bearer'
+            }
+        }
+        resp = lambda_handler(make_event('POST', '/users/login', body={
+            'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        assert resp['statusCode'] == 200
+        body = json.loads(resp['body'])
+        assert body['IdToken']      == 'id-token-abc'
+        assert body['AccessToken']  == 'access-token-abc'
+        assert body['RefreshToken'] == 'refresh-token-abc'
+        assert body['ExpiresIn']    == 3600
+        assert body['TokenType']    == 'Bearer'
+
+    def test_login_calls_cognito_with_correct_params(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        mock_cognito.initiate_auth.return_value = {
+            'AuthenticationResult': {
+                'IdToken': 'tok', 'AccessToken': 'tok',
+                'RefreshToken': 'tok', 'ExpiresIn': 3600, 'TokenType': 'Bearer'
+            }
+        }
+        lambda_handler(make_event('POST', '/users/login', body={
+            'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        mock_cognito.initiate_auth.assert_called_once_with(
+            ClientId='test-client-id',
+            AuthFlow='USER_PASSWORD_AUTH',
+            AuthParameters={
+                'USERNAME': 'alice@example.com',
+                'PASSWORD': 'Pass123!'
+            }
+        )
+
+    def test_wrong_password_returns_401(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.initiate_auth.side_effect = ClientError(
+            {'Error': {'Code': 'NotAuthorizedException', 'Message': 'Incorrect username or password'}},
+            'InitiateAuth'
+        )
+        resp = lambda_handler(make_event('POST', '/users/login', body={
+            'email': 'alice@example.com', 'password': 'WrongPass!'
+        }), {})
+        assert resp['statusCode'] == 401
+        assert 'Incorrect email or password' in json.loads(resp['body'])['Message']
+        assert json.loads(resp['body'])['ErrorCode'] == 'NotAuthorizedException'
+
+    def test_unconfirmed_user_returns_401(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.initiate_auth.side_effect = ClientError(
+            {'Error': {'Code': 'UserNotConfirmedException', 'Message': 'Not confirmed'}},
+            'InitiateAuth'
+        )
+        resp = lambda_handler(make_event('POST', '/users/login', body={
+            'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        assert resp['statusCode'] == 401
+        assert 'verify your email' in json.loads(resp['body'])['Message'].lower()
+
+    def test_unknown_user_returns_401(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.initiate_auth.side_effect = ClientError(
+            {'Error': {'Code': 'UserNotFoundException', 'Message': 'User does not exist'}},
+            'InitiateAuth'
+        )
+        resp = lambda_handler(make_event('POST', '/users/login', body={
+            'email': 'ghost@example.com', 'password': 'Pass123!'
+        }), {})
+        assert resp['statusCode'] == 401
+        assert 'No account found' in json.loads(resp['body'])['Message']
+
+    def test_password_reset_required_returns_401(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.initiate_auth.side_effect = ClientError(
+            {'Error': {'Code': 'PasswordResetRequiredException', 'Message': 'Reset required'}},
+            'InitiateAuth'
+        )
+        resp = lambda_handler(make_event('POST', '/users/login', body={
+            'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        assert resp['statusCode'] == 401
+        assert 'Password reset' in json.loads(resp['body'])['Message']
+
+    def test_unknown_cognito_error_returns_401(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.initiate_auth.side_effect = ClientError(
+            {'Error': {'Code': 'TooManyRequestsException', 'Message': 'Rate limited'}},
+            'InitiateAuth'
+        )
+        resp = lambda_handler(make_event('POST', '/users/login', body={
+            'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        assert resp['statusCode'] == 401
+        assert 'Login failed' in json.loads(resp['body'])['Message']
+
+    def test_successful_login_publishes_user_login_metric(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        mock_cognito.initiate_auth.return_value = {
+            'AuthenticationResult': {
+                'IdToken': 'tok', 'AccessToken': 'tok',
+                'RefreshToken': 'tok', 'ExpiresIn': 3600, 'TokenType': 'Bearer'
+            }
+        }
+        lambda_handler(make_event('POST', '/users/login', body={
+            'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'UserLogin' in metric_names
+
+    def test_login_failure_publishes_login_error_metric(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.initiate_auth.side_effect = ClientError(
+            {'Error': {'Code': 'NotAuthorizedException', 'Message': 'Bad creds'}},
+            'InitiateAuth'
+        )
+        lambda_handler(make_event('POST', '/users/login', body={
+            'email': 'alice@example.com', 'password': 'Wrong!'
+        }), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'LoginError' in metric_names
+
+    def test_validation_failure_publishes_validation_error_metric(self, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        lambda_handler(make_event('POST', '/users/login', body={'email': 'alice@example.com'}), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'ValidationError' in metric_names
 
 
 # ── PUT /users/{userid} ───────────────────────────────────────────────────────

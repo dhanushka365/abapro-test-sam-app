@@ -171,7 +171,98 @@ def lambda_handler(event, context):
                         logger.error(json.dumps({'event': 'COGNITO_ROLLBACK_FAIL', 'email': email, 'error': str(rollback_err)}))
                         put_metric('CognitoRollbackError', Operation='POST /users')
                     status_code   = 500
-                    response_body = {'Message': 'User registration failed due to a database error. Please try again.'}
+                    response_body = {'Message': 'User registration failed due to a database error. Please try again.'}        # Verify email with confirmation code sent by Cognito
+        if route_key == 'POST /users/verify':
+            request_json = json.loads(event['body'])
+            email = request_json.get('email')
+            code  = request_json.get('code')
+            if not email or not code:
+                status_code   = 400
+                response_body = {'Message': 'email and code are required'}
+                put_metric('ValidationError', Operation='POST /users/verify')
+            else:
+                try:
+                    cognito.confirm_sign_up(
+                        ClientId=USER_POOL_CLIENT_ID,
+                        Username=email,
+                        ConfirmationCode=code
+                    )
+                    # Mark verified in DynamoDB (best-effort — find by email scan)
+                    scan = ddbTable.scan(
+                        FilterExpression='email = :e',
+                        ExpressionAttributeValues={':e': email}
+                    )
+                    if scan.get('Items'):
+                        userid = scan['Items'][0]['userid']
+                        ddbTable.update_item(
+                            Key={'userid': userid},
+                            UpdateExpression='SET email_verified = :v, verified_at = :t',
+                            ExpressionAttributeValues={
+                                ':v': True,
+                                ':t': datetime.now().isoformat()
+                            }
+                        )
+                    response_body = {'Message': 'Email verified successfully. You can now log in.'}
+                    status_code   = 200
+                    logger.info(json.dumps({'event': 'EMAIL_VERIFIED', 'email': email}))
+                    put_metric('EmailVerified', Operation='POST /users/verify')
+                except ClientError as e:
+                    error_code = e.response['Error']['Code']
+                    error_messages = {
+                        'CodeMismatchException':    'Invalid verification code. Please try again.',
+                        'ExpiredCodeException':     'Verification code has expired. Please request a new one.',
+                        'NotAuthorizedException':   'Account is already confirmed.',
+                        'UserNotFoundException':    'No account found with this email.',
+                    }
+                    msg = error_messages.get(error_code, f'Verification failed: {e.response["Error"]["Message"]}')
+                    status_code   = 400
+                    response_body = {'Message': msg, 'ErrorCode': error_code}
+                    logger.error(json.dumps({'event': 'EMAIL_VERIFY_FAIL', 'errorCode': error_code, 'email': email}))
+                    put_metric('EmailVerifyError', Operation='POST /users/verify', ErrorCode=error_code)
+
+        # Login — authenticate with Cognito and return tokens
+        if route_key == 'POST /users/login':
+            request_json = json.loads(event['body'])
+            email    = request_json.get('email')
+            password = request_json.get('password')
+            if not email or not password:
+                status_code   = 400
+                response_body = {'Message': 'email and password are required'}
+                put_metric('ValidationError', Operation='POST /users/login')
+            else:
+                try:
+                    auth_response = cognito.initiate_auth(
+                        ClientId=USER_POOL_CLIENT_ID,
+                        AuthFlow='USER_PASSWORD_AUTH',
+                        AuthParameters={
+                            'USERNAME': email,
+                            'PASSWORD': password
+                        }
+                    )
+                    tokens = auth_response['AuthenticationResult']
+                    response_body = {
+                        'IdToken':      tokens['IdToken'],
+                        'AccessToken':  tokens['AccessToken'],
+                        'RefreshToken': tokens['RefreshToken'],
+                        'ExpiresIn':    tokens['ExpiresIn'],
+                        'TokenType':    tokens['TokenType']
+                    }
+                    status_code = 200
+                    logger.info(json.dumps({'event': 'LOGIN_SUCCESS', 'email': email}))
+                    put_metric('UserLogin', Operation='POST /users/login')
+                except ClientError as e:
+                    error_code = e.response['Error']['Code']
+                    error_messages = {
+                        'NotAuthorizedException':       'Incorrect email or password.',
+                        'UserNotConfirmedException':    'Please verify your email before logging in.',
+                        'UserNotFoundException':        'No account found with this email.',
+                        'PasswordResetRequiredException': 'Password reset is required.',
+                    }
+                    msg = error_messages.get(error_code, f'Login failed: {e.response["Error"]["Message"]}')
+                    status_code   = 401
+                    response_body = {'Message': msg, 'ErrorCode': error_code}
+                    logger.error(json.dumps({'event': 'LOGIN_FAIL', 'errorCode': error_code, 'email': email}))
+                    put_metric('LoginError', Operation='POST /users/login', ErrorCode=error_code)
 
         # Update a specific user by ID — only the owner can update their own record
         if route_key == 'PUT /users/{userid}':

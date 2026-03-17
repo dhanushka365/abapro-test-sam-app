@@ -16,7 +16,7 @@ Globals:
         USERS_TABLE: !Ref UsersTable
         USER_POOL_CLIENT_ID: !Ref UserPoolClient
         USER_POOL_ID: !Ref UserPool
-        STACK_NAME: !Ref AWS::StackName
+        STACK_NAME: !Sub '${AWS::StackName}'
 
 Resources:
   # Cognito
@@ -104,6 +104,8 @@ Resources:
               Action:
                 - cognito-idp:SignUp
                 - cognito-idp:AdminDeleteUser
+                - cognito-idp:ConfirmSignUp
+                - cognito-idp:InitiateAuth
               Resource: !GetAtt UserPool.Arn
         - Statement:
             - Effect: Allow
@@ -143,6 +145,22 @@ Resources:
             RestApiId: !Ref UsersApi
             Path: /users/{userid}
             Method: DELETE
+        VerifyUser:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UsersApi
+            Path: /users/verify
+            Method: POST
+            Auth:
+              Authorizer: NONE
+        LoginUser:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UsersApi
+            Path: /users/login
+            Method: POST
+            Auth:
+              Authorizer: NONE
 
   # CloudWatch Alarm — Lambda errors > 0 in 5 minutes
   LambdaErrorAlarm:
@@ -254,6 +272,8 @@ Resources:
                   ["${AWS::StackName}/UsersAPI","GetUsers"],
                   ["${AWS::StackName}/UsersAPI","GetUserById"],
                   ["${AWS::StackName}/UsersAPI","UserRegistered"],
+                  ["${AWS::StackName}/UsersAPI","EmailVerified"],
+                  ["${AWS::StackName}/UsersAPI","UserLogin"],
                   ["${AWS::StackName}/UsersAPI","UpdateUser"],
                   ["${AWS::StackName}/UsersAPI","DeleteUser"]
                 ],
@@ -268,6 +288,8 @@ Resources:
                 "region": "${AWS::Region}",
                 "metrics": [
                   ["${AWS::StackName}/UsersAPI","CognitoSignUpError",{"color":"#d62728"}],
+                  ["${AWS::StackName}/UsersAPI","EmailVerifyError",{"color":"#9467bd"}],
+                  ["${AWS::StackName}/UsersAPI","LoginError",{"color":"#e377c2"}],
                   ["${AWS::StackName}/UsersAPI","DynamoDBWriteError",{"color":"#8c564b"}],
                   ["${AWS::StackName}/UsersAPI","AuthorizationFailure",{"color":"#ff7f0e"}],
                   ["${AWS::StackName}/UsersAPI","ValidationError",{"color":"#bcbd22"}]
