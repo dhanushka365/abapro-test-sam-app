@@ -16,6 +16,7 @@ Globals:
         USERS_TABLE: !Ref UsersTable
         USER_POOL_CLIENT_ID: !Ref UserPoolClient
         USER_POOL_ID: !Ref UserPool
+        STACK_NAME: !Ref AWS::StackName
 
 Resources:
   # Cognito
@@ -91,6 +92,10 @@ Resources:
     Properties:
       CodeUri: src/api/
       Handler: users.lambda_handler
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: INFO
+        SystemLogLevel: WARN
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref UsersTable
@@ -100,6 +105,11 @@ Resources:
                 - cognito-idp:SignUp
                 - cognito-idp:AdminDeleteUser
               Resource: !GetAtt UserPool.Arn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: '*'
       Events:
         GetUsers:
           Type: Api
@@ -134,6 +144,140 @@ Resources:
             Path: /users/{userid}
             Method: DELETE
 
+  # CloudWatch Alarm — Lambda errors > 0 in 5 minutes
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-LambdaErrors
+      AlarmDescription: Triggers when the Lambda function throws any errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref UsersFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm — Lambda p99 duration > 10s
+  LambdaLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-HighLatency
+      AlarmDescription: Triggers when Lambda p99 duration exceeds 10 seconds
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref UsersFunction
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm — custom metric: CognitoSignUpError
+  CognitoSignUpErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-CognitoSignUpErrors
+      AlarmDescription: Triggers on Cognito sign-up failures
+      Namespace: !Sub ${AWS::StackName}/UsersAPI
+      MetricName: CognitoSignUpError
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm — custom metric: DynamoDBWriteError
+  DynamoDBWriteErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-DynamoDBWriteErrors
+      AlarmDescription: Triggers on DynamoDB write failures during user registration
+      Namespace: !Sub ${AWS::StackName}/UsersAPI
+      MetricName: DynamoDBWriteError
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # CloudWatch Dashboard
+  UsersDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${AWS::StackName}-Dashboard
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Invocations & Errors",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/Lambda","Invocations","FunctionName","${UsersFunction}"],
+                  ["AWS/Lambda","Errors","FunctionName","${UsersFunction}",{"color":"#d62728"}]
+                ],
+                "period": 300, "stat": "Sum", "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Duration (p50 / p99)",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/Lambda","Duration","FunctionName","${UsersFunction}",{"stat":"p50"}],
+                  ["AWS/Lambda","Duration","FunctionName","${UsersFunction}",{"stat":"p99","color":"#ff7f0e"}]
+                ],
+                "period": 300, "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "width": 12, "height": 6,
+              "properties": {
+                "title": "API Operations (custom metrics)",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["${AWS::StackName}/UsersAPI","GetUsers"],
+                  ["${AWS::StackName}/UsersAPI","GetUserById"],
+                  ["${AWS::StackName}/UsersAPI","UserRegistered"],
+                  ["${AWS::StackName}/UsersAPI","UpdateUser"],
+                  ["${AWS::StackName}/UsersAPI","DeleteUser"]
+                ],
+                "period": 300, "stat": "Sum", "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "width": 12, "height": 6,
+              "properties": {
+                "title": "Errors & Auth Failures (custom metrics)",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["${AWS::StackName}/UsersAPI","CognitoSignUpError",{"color":"#d62728"}],
+                  ["${AWS::StackName}/UsersAPI","DynamoDBWriteError",{"color":"#8c564b"}],
+                  ["${AWS::StackName}/UsersAPI","AuthorizationFailure",{"color":"#ff7f0e"}],
+                  ["${AWS::StackName}/UsersAPI","ValidationError",{"color":"#bcbd22"}]
+                ],
+                "period": 300, "stat": "Sum", "view": "timeSeries"
+              }
+            }
+          ]
+        }
+
 Outputs:
   UsersTable:
     Description: DynamoDB Users table
@@ -154,3 +298,7 @@ Outputs:
   UserPoolClientId:
     Description: Cognito User Pool Client ID
     Value: !Ref UserPoolClient
+
+  Dashboard:
+    Description: CloudWatch Dashboard URL
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home#dashboards:name=${AWS::StackName}-Dashboard"

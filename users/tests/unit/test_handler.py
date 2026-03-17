@@ -29,12 +29,26 @@ def make_event(method, resource, path_params=None, body=None, cognito_sub=None):
 @pytest.fixture(autouse=True)
 def mock_ddb_env(monkeypatch):
     monkeypatch.setenv('USERS_TABLE', 'test-users-table')
+    monkeypatch.setenv('USER_POOL_CLIENT_ID', 'test-client-id')
+    monkeypatch.setenv('USER_POOL_ID', 'us-east-1_testPool')
 
 
 @pytest.fixture()
 def mock_ddb_table():
     with patch('src.api.users.ddbTable') as mock_table:
         yield mock_table
+
+
+@pytest.fixture()
+def mock_cognito():
+    with patch('src.api.users.cognito') as mock_cog:
+        yield mock_cog
+
+
+@pytest.fixture()
+def mock_cw():
+    with patch('src.api.users.cw_client') as mock_cloudwatch:
+        yield mock_cloudwatch
 
 
 # ── get_caller_sub ────────────────────────────────────────────────────────────
@@ -94,28 +108,156 @@ class TestGetUserById:
 # ── POST /users ───────────────────────────────────────────────────────────────
 
 class TestPostUser:
-    def test_uses_cognito_sub_as_userid(self, mock_ddb_table):
+
+    # ── Scenario 1: Missing required fields ───────────────────────────────────
+    def test_missing_email_returns_400(self, mock_ddb_table, mock_cognito):
         from src.api.users import lambda_handler
+        resp = lambda_handler(make_event('POST', '/users', body={'name': 'Alice', 'password': 'Pass123!'}), {})
+        assert resp['statusCode'] == 400
+        assert 'email and password are required' in json.loads(resp['body'])['Message']
+        mock_cognito.sign_up.assert_not_called()
+        mock_ddb_table.put_item.assert_not_called()
+
+    def test_missing_password_returns_400(self, mock_ddb_table, mock_cognito):
+        from src.api.users import lambda_handler
+        resp = lambda_handler(make_event('POST', '/users', body={'name': 'Alice', 'email': 'alice@example.com'}), {})
+        assert resp['statusCode'] == 400
+        assert 'email and password are required' in json.loads(resp['body'])['Message']
+        mock_cognito.sign_up.assert_not_called()
+        mock_ddb_table.put_item.assert_not_called()
+
+    def test_missing_both_fields_returns_400(self, mock_ddb_table, mock_cognito):
+        from src.api.users import lambda_handler
+        resp = lambda_handler(make_event('POST', '/users', body={'name': 'Alice'}), {})
+        assert resp['statusCode'] == 400
+        mock_cognito.sign_up.assert_not_called()
+
+    # ── Scenario 2: Cognito fails — DynamoDB never called ─────────────────────
+    def test_cognito_duplicate_email_returns_409(self, mock_ddb_table, mock_cognito):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.sign_up.side_effect = ClientError(
+            {'Error': {'Code': 'UsernameExistsException', 'Message': 'User already exists'}},
+            'SignUp'
+        )
+        resp = lambda_handler(make_event('POST', '/users', body={'name': 'Alice', 'email': 'alice@example.com', 'password': 'Pass123!'}), {})
+        assert resp['statusCode'] == 409
+        assert 'already exists' in json.loads(resp['body'])['Message']
+        assert json.loads(resp['body'])['ErrorCode'] == 'UsernameExistsException'
+        mock_ddb_table.put_item.assert_not_called()  # DynamoDB never touched
+
+    def test_cognito_weak_password_returns_400(self, mock_ddb_table, mock_cognito):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.sign_up.side_effect = ClientError(
+            {'Error': {'Code': 'InvalidPasswordException', 'Message': 'Password too weak'}},
+            'SignUp'
+        )
+        resp = lambda_handler(make_event('POST', '/users', body={'name': 'Alice', 'email': 'alice@example.com', 'password': 'weak'}), {})
+        assert resp['statusCode'] == 400
+        assert 'Password does not meet requirements' in json.loads(resp['body'])['Message']
+        mock_ddb_table.put_item.assert_not_called()
+
+    def test_cognito_invalid_email_returns_400(self, mock_ddb_table, mock_cognito):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.sign_up.side_effect = ClientError(
+            {'Error': {'Code': 'InvalidParameterException', 'Message': 'Invalid email'}},
+            'SignUp'
+        )
+        resp = lambda_handler(make_event('POST', '/users', body={'name': 'Alice', 'email': 'not-an-email', 'password': 'Pass123!'}), {})
+        assert resp['statusCode'] == 400
+        assert 'Invalid email' in json.loads(resp['body'])['Message']
+        mock_ddb_table.put_item.assert_not_called()
+
+    def test_cognito_unknown_error_returns_400(self, mock_ddb_table, mock_cognito):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.sign_up.side_effect = ClientError(
+            {'Error': {'Code': 'TooManyRequestsException', 'Message': 'Rate limit exceeded'}},
+            'SignUp'
+        )
+        resp = lambda_handler(make_event('POST', '/users', body={'name': 'Alice', 'email': 'alice@example.com', 'password': 'Pass123!'}), {})
+        assert resp['statusCode'] == 400
+        assert 'Registration failed' in json.loads(resp['body'])['Message']
+        mock_ddb_table.put_item.assert_not_called()
+
+    # ── Scenario 3: Both steps succeed ────────────────────────────────────────
+    def test_successful_registration_returns_201(self, mock_ddb_table, mock_cognito):
+        from src.api.users import lambda_handler
+        mock_cognito.sign_up.return_value = {'UserSub': 'cognito-sub-abc'}
         mock_ddb_table.put_item.return_value = {}
-        resp = lambda_handler(make_event('POST', '/users', body={'name': 'Alice'}, cognito_sub='sub-111'), {})
-        assert resp['statusCode'] == 200
+        resp = lambda_handler(make_event('POST', '/users', body={
+            'name': 'Alice', 'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        assert resp['statusCode'] == 201
         body = json.loads(resp['body'])
-        assert body['userid'] == 'sub-111'
-        assert body['created_by'] == 'sub-111'
+        assert body['userid'] == 'cognito-sub-abc'
+        assert body['created_by'] == 'cognito-sub-abc'
         assert 'timestamp' in body
+        assert 'password' not in body                          # password never stored
+        assert 'registered successfully' in body['message']
 
-    def test_generates_uuid_without_cognito(self, mock_ddb_table):
+    def test_successful_registration_with_extra_fields(self, mock_ddb_table, mock_cognito):
         from src.api.users import lambda_handler
+        mock_cognito.sign_up.return_value = {'UserSub': 'cognito-sub-xyz'}
         mock_ddb_table.put_item.return_value = {}
-        resp = lambda_handler(make_event('POST', '/users', body={'name': 'Bob'}), {})
-        assert resp['statusCode'] == 200
-        assert 'userid' in json.loads(resp['body'])
+        resp = lambda_handler(make_event('POST', '/users', body={
+            'name': 'Bob', 'email': 'bob@example.com', 'password': 'Pass123!', 'age': 30, 'city': 'New York'
+        }), {})
+        assert resp['statusCode'] == 201
+        body = json.loads(resp['body'])
+        assert body['age'] == 30
+        assert body['city'] == 'New York'
+        assert 'password' not in body
 
-    def test_keeps_provided_userid_without_cognito(self, mock_ddb_table):
+    def test_cognito_called_with_correct_params(self, mock_ddb_table, mock_cognito):
         from src.api.users import lambda_handler
+        mock_cognito.sign_up.return_value = {'UserSub': 'sub-999'}
         mock_ddb_table.put_item.return_value = {}
-        resp = lambda_handler(make_event('POST', '/users', body={'name': 'Carol', 'userid': 'custom-id'}), {})
-        assert json.loads(resp['body'])['userid'] == 'custom-id'
+        lambda_handler(make_event('POST', '/users', body={
+            'name': 'Alice', 'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        mock_cognito.sign_up.assert_called_once_with(
+            ClientId='test-client-id',
+            Username='alice@example.com',
+            Password='Pass123!',
+            UserAttributes=[{'Name': 'email', 'Value': 'alice@example.com'}]
+        )
+
+    # ── Scenario 4: Cognito succeeds, DynamoDB fails — rollback triggered ─────
+    def test_ddb_failure_triggers_cognito_rollback(self, mock_ddb_table, mock_cognito):
+        from src.api.users import lambda_handler
+        mock_cognito.sign_up.return_value = {'UserSub': 'cognito-sub-abc'}
+        mock_ddb_table.put_item.side_effect = Exception('DynamoDB unavailable')
+        mock_cognito.admin_delete_user.return_value = {}
+        resp = lambda_handler(make_event('POST', '/users', body={
+            'name': 'Alice', 'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        assert resp['statusCode'] == 500
+        assert 'database error' in json.loads(resp['body'])['Message']
+        # Rollback: Cognito user must be deleted
+        mock_cognito.admin_delete_user.assert_called_once_with(
+            UserPoolId='us-east-1_testPool',
+            Username='alice@example.com'
+        )
+
+    def test_ddb_failure_rollback_itself_fails_returns_500(self, mock_ddb_table, mock_cognito):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.sign_up.return_value = {'UserSub': 'cognito-sub-abc'}
+        mock_ddb_table.put_item.side_effect = Exception('DynamoDB unavailable')
+        # Rollback also fails
+        mock_cognito.admin_delete_user.side_effect = ClientError(
+            {'Error': {'Code': 'UserNotFoundException', 'Message': 'User not found'}},
+            'AdminDeleteUser'
+        )
+        resp = lambda_handler(make_event('POST', '/users', body={
+            'name': 'Alice', 'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        # Still returns 500 to the client even though rollback failed
+        assert resp['statusCode'] == 500
+        assert 'database error' in json.loads(resp['body'])['Message']
 
 
 # ── PUT /users/{userid} ───────────────────────────────────────────────────────
@@ -209,3 +351,138 @@ class TestEdgeCases:
         mock_ddb_table.scan.return_value = {'Items': []}
         resp = lambda_handler(make_event('GET', '/users'), {})
         assert resp['headers']['Access-Control-Allow-Origin'] == '*'
+
+
+# ── CloudWatch metrics ────────────────────────────────────────────────────────
+
+class TestCloudWatchMetrics:
+
+    def test_get_users_publishes_metric(self, mock_ddb_table, mock_cw):
+        from src.api.users import lambda_handler
+        mock_ddb_table.scan.return_value = {'Items': []}
+        lambda_handler(make_event('GET', '/users'), {})
+        mock_cw.put_metric_data.assert_called_once()
+        call_kwargs = mock_cw.put_metric_data.call_args[1]
+        assert call_kwargs['MetricData'][0]['MetricName'] == 'GetUsers'
+
+    def test_get_user_by_id_publishes_metric(self, mock_ddb_table, mock_cw):
+        from src.api.users import lambda_handler
+        mock_ddb_table.get_item.return_value = {'Item': {'userid': 'abc'}}
+        lambda_handler(make_event('GET', '/users/{userid}', path_params={'userid': 'abc'}), {})
+        mock_cw.put_metric_data.assert_called_once()
+        assert mock_cw.put_metric_data.call_args[1]['MetricData'][0]['MetricName'] == 'GetUserById'
+
+    def test_successful_registration_publishes_user_registered_metric(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        mock_cognito.sign_up.return_value = {'UserSub': 'sub-abc'}
+        mock_ddb_table.put_item.return_value = {}
+        lambda_handler(make_event('POST', '/users', body={
+            'name': 'Alice', 'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'UserRegistered' in metric_names
+
+    def test_missing_fields_publishes_validation_error_metric(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        lambda_handler(make_event('POST', '/users', body={'name': 'Alice'}), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'ValidationError' in metric_names
+
+    def test_cognito_signup_failure_publishes_cognito_error_metric(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        from botocore.exceptions import ClientError
+        mock_cognito.sign_up.side_effect = ClientError(
+            {'Error': {'Code': 'UsernameExistsException', 'Message': 'exists'}}, 'SignUp'
+        )
+        lambda_handler(make_event('POST', '/users', body={
+            'name': 'Alice', 'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'CognitoSignUpError' in metric_names
+
+    def test_ddb_write_failure_publishes_ddb_error_metric(self, mock_ddb_table, mock_cognito, mock_cw):
+        from src.api.users import lambda_handler
+        mock_cognito.sign_up.return_value = {'UserSub': 'sub-abc'}
+        mock_ddb_table.put_item.side_effect = Exception('DynamoDB down')
+        mock_cognito.admin_delete_user.return_value = {}
+        lambda_handler(make_event('POST', '/users', body={
+            'name': 'Alice', 'email': 'alice@example.com', 'password': 'Pass123!'
+        }), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'DynamoDBWriteError' in metric_names
+
+    def test_delete_forbidden_publishes_auth_failure_metric(self, mock_ddb_table, mock_cw):
+        from src.api.users import lambda_handler
+        lambda_handler(make_event(
+            'DELETE', '/users/{userid}',
+            path_params={'userid': 'other-user'},
+            cognito_sub='sub-111'
+        ), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'AuthorizationFailure' in metric_names
+
+    def test_update_forbidden_publishes_auth_failure_metric(self, mock_ddb_table, mock_cw):
+        from src.api.users import lambda_handler
+        lambda_handler(make_event(
+            'PUT', '/users/{userid}',
+            path_params={'userid': 'other-user'},
+            body={'name': 'Hacked'},
+            cognito_sub='sub-111'
+        ), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'AuthorizationFailure' in metric_names
+
+    def test_put_user_success_publishes_update_metric(self, mock_ddb_table, mock_cw):
+        from src.api.users import lambda_handler
+        mock_ddb_table.put_item.return_value = {}
+        lambda_handler(make_event(
+            'PUT', '/users/{userid}',
+            path_params={'userid': 'sub-111'},
+            body={'name': 'Updated'},
+            cognito_sub='sub-111'
+        ), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'UpdateUser' in metric_names
+
+    def test_delete_user_success_publishes_delete_metric(self, mock_ddb_table, mock_cw):
+        from src.api.users import lambda_handler
+        mock_ddb_table.delete_item.return_value = {}
+        lambda_handler(make_event(
+            'DELETE', '/users/{userid}',
+            path_params={'userid': 'sub-111'},
+            cognito_sub='sub-111'
+        ), {})
+        metric_names = [
+            call[1]['MetricData'][0]['MetricName']
+            for call in mock_cw.put_metric_data.call_args_list
+        ]
+        assert 'DeleteUser' in metric_names
+
+    def test_metric_failure_does_not_break_response(self, mock_ddb_table, mock_cw):
+        """CloudWatch being down must never crash the API."""
+        from src.api.users import lambda_handler
+        mock_ddb_table.scan.return_value = {'Items': []}
+        mock_cw.put_metric_data.side_effect = Exception('CW unavailable')
+        resp = lambda_handler(make_event('GET', '/users'), {})
+        assert resp['statusCode'] == 200  # API still responds normally
