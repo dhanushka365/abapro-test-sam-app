@@ -14,6 +14,7 @@ Globals:
     Environment:
       Variables:
         USERS_TABLE: !Ref UsersTable
+        USER_POOL_CLIENT_ID: !Ref UserPoolClient
 
 Resources:
   # ── Cognito ──────────────────────────────────────────────────────────────────
@@ -92,6 +93,11 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref UsersTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:SignUp
+              Resource: !GetAtt UserPool.Arn
       Events:
         GetUsers:
           Type: Api
@@ -111,6 +117,8 @@ Resources:
             RestApiId: !Ref UsersApi
             Path: /users
             Method: POST
+            Auth:
+              Authorizer: NONE
         PutUser:
           Type: Api
           Properties:

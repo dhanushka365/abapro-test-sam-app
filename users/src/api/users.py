@@ -9,8 +9,12 @@ from datetime import datetime
 
 # Prepare DynamoDB client
 USERS_TABLE = os.getenv('USERS_TABLE', None)
+USER_POOL_CLIENT_ID = os.getenv('USER_POOL_CLIENT_ID', None)
+
 dynamodb = boto3.resource('dynamodb')
 ddbTable = dynamodb.Table(USERS_TABLE)
+
+cognito = boto3.client('cognito-idp')
 
 def get_caller_sub(event):
     """Extract the Cognito sub (user ID) from the JWT authorizer context."""
@@ -62,21 +66,40 @@ def lambda_handler(event, context):
             else:
                 ddbTable.delete_item(Key={'userid': userid})
                 response_body = {}
-                status_code = 200
-
-        # Create a new user — userid is set to the Cognito sub so it's tied to the identity
+                status_code = 200        # Create a new user — registers in Cognito AND saves to DynamoDB
         if route_key == 'POST /users':
             request_json = json.loads(event['body'])
-            request_json['timestamp'] = datetime.now().isoformat()
-            # Use Cognito sub as userid if available, otherwise generate one
-            if caller_sub:
-                request_json['userid'] = caller_sub
-            elif 'userid' not in request_json:
-                request_json['userid'] = str(uuid.uuid1())
-            request_json['created_by'] = caller_sub or request_json['userid']
-            ddbTable.put_item(Item=request_json)
-            response_body = request_json
-            status_code = 200
+
+            email = request_json.get('email')
+            password = request_json.get('password')
+
+            if not email or not password:
+                status_code = 400
+                response_body = {'Message': 'email and password are required to create a user'}
+            else:
+                # Step 1: Register user in Cognito
+                cognito_response = cognito.sign_up(
+                    ClientId=USER_POOL_CLIENT_ID,
+                    Username=email,
+                    Password=password,
+                    UserAttributes=[
+                        {'Name': 'email', 'Value': email},
+                    ]
+                )
+                cognito_sub = cognito_response['UserSub']
+
+                # Step 2: Save user profile to DynamoDB (password is NOT stored)
+                request_json.pop('password', None)
+                request_json['userid'] = cognito_sub
+                request_json['created_by'] = cognito_sub
+                request_json['timestamp'] = datetime.now().isoformat()
+
+                ddbTable.put_item(Item=request_json)
+                response_body = {
+                    **request_json,
+                    'message': 'User registered successfully. Please check your email to confirm your account.'
+                }
+                status_code = 201
 
         # Update a specific user by ID — only the owner can update their own record
         if route_key == 'PUT /users/{userid}':
