@@ -16,6 +16,43 @@ Globals:
         USERS_TABLE: !Ref UsersTable
 
 Resources:
+  # ── Cognito ──────────────────────────────────────────────────────────────────
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${AWS::StackName}-UserPool
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${AWS::StackName}-UserPoolClient
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+
+  # ── DynamoDB ─────────────────────────────────────────────────────────────────
   UsersTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -28,17 +65,30 @@ Resources:
           KeyType: HASH
       BillingMode: PAY_PER_REQUEST
 
+  # ── API Gateway + Cognito Authorizer ─────────────────────────────────────────
   UsersApi:
     Type: AWS::Serverless::Api
     Properties:
       StageName: prod
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+            Identity:
+              Header: Authorization
+        AddDefaultAuthorizerToCorsPreflight: false
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+
+  # ── Lambda ───────────────────────────────────────────────────────────────────
   UsersFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/api/
       Handler: users.lambda_handler
-      # If your IAM user cannot create roles, replace the Policies block below
-      # with: Role: arn:aws:iam::151440288946:role/YOUR_EXISTING_LAMBDA_ROLE
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref UsersTable
@@ -86,3 +136,11 @@ Outputs:
   UsersFunction:
     Description: Lambda Function ARN
     Value: !GetAtt UsersFunction.Arn
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient

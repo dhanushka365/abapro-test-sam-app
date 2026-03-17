@@ -12,6 +12,14 @@ USERS_TABLE = os.getenv('USERS_TABLE', None)
 dynamodb = boto3.resource('dynamodb')
 ddbTable = dynamodb.Table(USERS_TABLE)
 
+def get_caller_sub(event):
+    """Extract the Cognito sub (user ID) from the JWT authorizer context."""
+    try:
+        return event['requestContext']['authorizer']['claims']['sub']
+    except (KeyError, TypeError):
+        return None
+
+
 def lambda_handler(event, context):
     route_key = f"{event['httpMethod']} {event['resource']}"
 
@@ -19,68 +27,71 @@ def lambda_handler(event, context):
     response_body = {'Message': 'Unsupported route'}
     status_code = 400
     headers = {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
+        'Content-Type': 'application/json',        'Access-Control-Allow-Origin': '*'
         }
 
     try:
+        caller_sub = get_caller_sub(event)
+
         # Get a list of all Users
         if route_key == 'GET /users':
             ddb_response = ddbTable.scan(Select='ALL_ATTRIBUTES')
-            # return list of items instead of full DynamoDB response
             response_body = ddb_response['Items']
             status_code = 200
 
         # CRUD operations for a single User
-       
+
         # Read a user by ID
         if route_key == 'GET /users/{userid}':
-            # get data from the database
             ddb_response = ddbTable.get_item(
                 Key={'userid': event['pathParameters']['userid']}
             )
-            # return single item instead of full DynamoDB response
             if 'Item' in ddb_response:
                 response_body = ddb_response['Item']
             else:
                 response_body = {}
             status_code = 200
-        
-        # Delete a user by ID
+
+        # Delete a user by ID — only the owner can delete their own record
         if route_key == 'DELETE /users/{userid}':
-            # delete item in the database
-            ddbTable.delete_item(
-                Key={'userid': event['pathParameters']['userid']}
-            )
-            response_body = {}
-            status_code = 200
-        
-        # Create a new user 
+            userid = event['pathParameters']['userid']
+            # Ownership check: Cognito sub must match the userid
+            if caller_sub and caller_sub != userid:
+                status_code = 403
+                response_body = {'Message': 'Forbidden: you can only delete your own record'}
+            else:
+                ddbTable.delete_item(Key={'userid': userid})
+                response_body = {}
+                status_code = 200
+
+        # Create a new user — userid is set to the Cognito sub so it's tied to the identity
         if route_key == 'POST /users':
             request_json = json.loads(event['body'])
             request_json['timestamp'] = datetime.now().isoformat()
-            # generate unique id if it isn't present in the request
-            if 'userid' not in request_json:
+            # Use Cognito sub as userid if available, otherwise generate one
+            if caller_sub:
+                request_json['userid'] = caller_sub
+            elif 'userid' not in request_json:
                 request_json['userid'] = str(uuid.uuid1())
-            # update the database
-            ddbTable.put_item(
-                Item=request_json
-            )
+            request_json['created_by'] = caller_sub or request_json['userid']
+            ddbTable.put_item(Item=request_json)
             response_body = request_json
             status_code = 200
 
-        # Update a specific user by ID
+        # Update a specific user by ID — only the owner can update their own record
         if route_key == 'PUT /users/{userid}':
-            # update item in the database
-            request_json = json.loads(event['body'])
-            request_json['timestamp'] = datetime.now().isoformat()
-            request_json['userid'] = event['pathParameters']['userid']
-            # update the database
-            ddbTable.put_item(
-                Item=request_json
-            )
-            response_body = request_json
-            status_code = 200
+            userid = event['pathParameters']['userid']
+            # Ownership check: Cognito sub must match the userid
+            if caller_sub and caller_sub != userid:
+                status_code = 403
+                response_body = {'Message': 'Forbidden: you can only update your own record'}
+            else:
+                request_json = json.loads(event['body'])
+                request_json['timestamp'] = datetime.now().isoformat()
+                request_json['userid'] = userid
+                ddbTable.put_item(Item=request_json)
+                response_body = request_json
+                status_code = 200
     except Exception as err:
         status_code = 400
         response_body = {'Error:': str(err)}
