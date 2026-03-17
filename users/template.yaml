@@ -6,7 +6,14 @@ Transform: AWS::Serverless-2016-10-31
 Description: >
   SAM Template for Serverless Patterns v1 - Data store
 
-# Globals:
+Globals:
+  Function:
+    Runtime: python3.12
+    MemorySize: 128
+    Timeout: 30
+    Environment:
+      Variables:
+        USERS_TABLE: !Ref UsersTable
 
 Resources:
   UsersTable:
@@ -21,8 +28,61 @@ Resources:
           KeyType: HASH
       BillingMode: PAY_PER_REQUEST
 
+  UsersApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+  UsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/api/
+      Handler: users.lambda_handler
+      # If your IAM user cannot create roles, replace the Policies block below
+      # with: Role: arn:aws:iam::151440288946:role/YOUR_EXISTING_LAMBDA_ROLE
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Events:
+        GetUsers:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UsersApi
+            Path: /users
+            Method: GET
+        GetUserById:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UsersApi
+            Path: /users/{userid}
+            Method: GET
+        PostUser:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UsersApi
+            Path: /users
+            Method: POST
+        PutUser:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UsersApi
+            Path: /users/{userid}
+            Method: PUT
+        DeleteUser:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UsersApi
+            Path: /users/{userid}
+            Method: DELETE
+
 Outputs:
   UsersTable:
     Description: DynamoDB Users table
-    Value:
-      Ref: UsersTable
+    Value: !Ref UsersTable
+
+  UsersApi:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${UsersApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+
+  UsersFunction:
+    Description: Lambda Function ARN
+    Value: !GetAtt UsersFunction.Arn
