@@ -5,11 +5,13 @@ import json
 import uuid
 import os
 import boto3
+from botocore.exceptions import ClientError
 from datetime import datetime
 
 # Prepare DynamoDB client
 USERS_TABLE = os.getenv('USERS_TABLE', None)
 USER_POOL_CLIENT_ID = os.getenv('USER_POOL_CLIENT_ID', None)
+USER_POOL_ID = os.getenv('USER_POOL_ID', None)
 
 dynamodb = boto3.resource('dynamodb')
 ddbTable = dynamodb.Table(USERS_TABLE)
@@ -77,29 +79,62 @@ def lambda_handler(event, context):
                 status_code = 400
                 response_body = {'Message': 'email and password are required to create a user'}
             else:
-                # Step 1: Register user in Cognito
-                cognito_response = cognito.sign_up(
-                    ClientId=USER_POOL_CLIENT_ID,
-                    Username=email,
-                    Password=password,
-                    UserAttributes=[
-                        {'Name': 'email', 'Value': email},
-                    ]
-                )
-                cognito_sub = cognito_response['UserSub']
+                cognito_sub = None
+                try:
+                    # ── Step 1: Register user in Cognito ──────────────────────
+                    cognito_response = cognito.sign_up(
+                        ClientId=USER_POOL_CLIENT_ID,
+                        Username=email,
+                        Password=password,
+                        UserAttributes=[
+                            {'Name': 'email', 'Value': email},
+                        ]
+                    )
+                    cognito_sub = cognito_response['UserSub']
+                except ClientError as cognito_err:
+                    # Cognito failed — DynamoDB was never touched, safe to return error
+                    error_code = cognito_err.response['Error']['Code']
+                    error_messages = {
+                        'UsernameExistsException': 'An account with this email already exists.',
+                        'InvalidPasswordException': 'Password does not meet requirements (min 8 chars, upper, lower, number).',
+                        'InvalidParameterException': 'Invalid email or parameter provided.',
+                    }
+                    msg = error_messages.get(error_code, f'Registration failed: {cognito_err.response["Error"]["Message"]}')
+                    status_code = 409 if error_code == 'UsernameExistsException' else 400
+                    response_body = {'Message': msg, 'ErrorCode': error_code}
+                    return {
+                        'statusCode': status_code,
+                        'body': json.dumps(response_body),
+                        'headers': headers
+                    }
 
-                # Step 2: Save user profile to DynamoDB (password is NOT stored)
-                request_json.pop('password', None)
-                request_json['userid'] = cognito_sub
-                request_json['created_by'] = cognito_sub
-                request_json['timestamp'] = datetime.now().isoformat()
+                try:
+                    # ── Step 2: Save profile to DynamoDB (password NOT stored) ─
+                    request_json.pop('password', None)
+                    request_json['userid'] = cognito_sub
+                    request_json['created_by'] = cognito_sub
+                    request_json['timestamp'] = datetime.now().isoformat()
 
-                ddbTable.put_item(Item=request_json)
-                response_body = {
-                    **request_json,
-                    'message': 'User registered successfully. Please check your email to confirm your account.'
-                }
-                status_code = 201
+                    ddbTable.put_item(Item=request_json)
+                    response_body = {
+                        **request_json,
+                        'message': 'User registered successfully. Please check your email to confirm your account.'
+                    }
+                    status_code = 201
+                except Exception as ddb_err:
+                    # ── ROLLBACK: DynamoDB failed — delete the Cognito user ────
+                    print(f'DynamoDB failed for {cognito_sub}, rolling back Cognito user. Error: {ddb_err}')
+                    try:
+                        cognito.admin_delete_user(
+                            UserPoolId=USER_POOL_ID,
+                            Username=email
+                        )
+                        print(f'Rollback successful: Cognito user {email} deleted.')
+                    except ClientError as rollback_err:
+                        # Rollback itself failed — log it for manual cleanup
+                        print(f'ROLLBACK FAILED for Cognito user {email}: {rollback_err}')
+                    status_code = 500
+                    response_body = {'Message': 'User registration failed due to a database error. Please try again.'}
 
         # Update a specific user by ID — only the owner can update their own record
         if route_key == 'PUT /users/{userid}':

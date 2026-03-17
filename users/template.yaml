@@ -1,4 +1,4 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+﻿# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
 AWSTemplateFormatVersion: '2010-09-09'
@@ -15,9 +15,10 @@ Globals:
       Variables:
         USERS_TABLE: !Ref UsersTable
         USER_POOL_CLIENT_ID: !Ref UserPoolClient
+        USER_POOL_ID: !Ref UserPool
 
 Resources:
-  # ── Cognito ──────────────────────────────────────────────────────────────────
+  # Cognito
   UserPool:
     Type: AWS::Cognito::UserPool
     Properties:
@@ -53,7 +54,7 @@ Resources:
       IdTokenValidity: 1
       RefreshTokenValidity: 30
 
-  # ── DynamoDB ─────────────────────────────────────────────────────────────────
+  # DynamoDB
   UsersTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -66,7 +67,7 @@ Resources:
           KeyType: HASH
       BillingMode: PAY_PER_REQUEST
 
-  # ── API Gateway + Cognito Authorizer ─────────────────────────────────────────
+  # API Gateway + Cognito Authorizer
   UsersApi:
     Type: AWS::Serverless::Api
     Properties:
@@ -84,7 +85,7 @@ Resources:
         AllowHeaders: "'Content-Type,Authorization'"
         AllowOrigin: "'*'"
 
-  # ── Lambda ───────────────────────────────────────────────────────────────────
+  # Lambda
   UsersFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -97,6 +98,7 @@ Resources:
             - Effect: Allow
               Action:
                 - cognito-idp:SignUp
+                - cognito-idp:AdminDeleteUser
               Resource: !GetAtt UserPool.Arn
       Events:
         GetUsers:
