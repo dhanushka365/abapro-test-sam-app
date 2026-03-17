@@ -22,6 +22,8 @@ Resources:
   # Cognito
   UserPool:
     Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       UserPoolName: !Sub ${AWS::StackName}-UserPool
       AutoVerifiedAttributes:
@@ -58,6 +60,8 @@ Resources:
   # DynamoDB
   UsersTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub ${AWS::StackName}-Users
       AttributeDefinitions:
@@ -67,6 +71,8 @@ Resources:
         - AttributeName: userid
           KeyType: HASH
       BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
 
   # API Gateway + Cognito Authorizer
   UsersApi:
@@ -162,6 +168,12 @@ Resources:
             Auth:
               Authorizer: NONE
 
+  # SNS Topic — receives all CloudWatch alarm notifications
+  AlarmNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-Alarms
+
   # CloudWatch Alarm — Lambda errors > 0 in 5 minutes
   LambdaErrorAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -179,6 +191,10 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
 
   # CloudWatch Alarm — Lambda p99 duration > 10s
   LambdaLatencyAlarm:
@@ -197,6 +213,10 @@ Resources:
       Threshold: 10000
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
 
   # CloudWatch Alarm — custom metric: CognitoSignUpError
   CognitoSignUpErrorAlarm:
@@ -212,6 +232,10 @@ Resources:
       Threshold: 3
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
 
   # CloudWatch Alarm — custom metric: DynamoDBWriteError
   DynamoDBWriteErrorAlarm:
@@ -227,6 +251,10 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
 
   # CloudWatch Dashboard
   UsersDashboard:
@@ -269,13 +297,13 @@ Resources:
                 "title": "API Operations (custom metrics)",
                 "region": "${AWS::Region}",
                 "metrics": [
-                  ["${AWS::StackName}/UsersAPI","GetUsers"],
-                  ["${AWS::StackName}/UsersAPI","GetUserById"],
-                  ["${AWS::StackName}/UsersAPI","UserRegistered"],
-                  ["${AWS::StackName}/UsersAPI","EmailVerified"],
-                  ["${AWS::StackName}/UsersAPI","UserLogin"],
-                  ["${AWS::StackName}/UsersAPI","UpdateUser"],
-                  ["${AWS::StackName}/UsersAPI","DeleteUser"]
+                  ["${AWS::StackName}/UsersAPI","GetUsers","Operation","GET /users"],
+                  ["${AWS::StackName}/UsersAPI","GetUserById","Operation","GET /users/{userid}"],
+                  ["${AWS::StackName}/UsersAPI","UserRegistered","Operation","POST /users"],
+                  ["${AWS::StackName}/UsersAPI","EmailVerified","Operation","POST /users/verify"],
+                  ["${AWS::StackName}/UsersAPI","UserLogin","Operation","POST /users/login"],
+                  ["${AWS::StackName}/UsersAPI","UpdateUser","Operation","PUT /users/{userid}"],
+                  ["${AWS::StackName}/UsersAPI","DeleteUser","Operation","DELETE /users/{userid}"]
                 ],
                 "period": 300, "stat": "Sum", "view": "timeSeries"
               }
@@ -287,12 +315,13 @@ Resources:
                 "title": "Errors & Auth Failures (custom metrics)",
                 "region": "${AWS::Region}",
                 "metrics": [
-                  ["${AWS::StackName}/UsersAPI","CognitoSignUpError",{"color":"#d62728"}],
-                  ["${AWS::StackName}/UsersAPI","EmailVerifyError",{"color":"#9467bd"}],
-                  ["${AWS::StackName}/UsersAPI","LoginError",{"color":"#e377c2"}],
-                  ["${AWS::StackName}/UsersAPI","DynamoDBWriteError",{"color":"#8c564b"}],
-                  ["${AWS::StackName}/UsersAPI","AuthorizationFailure",{"color":"#ff7f0e"}],
-                  ["${AWS::StackName}/UsersAPI","ValidationError",{"color":"#bcbd22"}]
+                  ["${AWS::StackName}/UsersAPI","CognitoSignUpError","Operation","POST /users",{"color":"#d62728"}],
+                  ["${AWS::StackName}/UsersAPI","EmailVerifyError","Operation","POST /users/verify",{"color":"#9467bd"}],
+                  ["${AWS::StackName}/UsersAPI","LoginError","Operation","POST /users/login",{"color":"#e377c2"}],
+                  ["${AWS::StackName}/UsersAPI","DynamoDBWriteError","Operation","POST /users",{"color":"#8c564b"}],
+                  ["${AWS::StackName}/UsersAPI","AuthorizationFailure","Operation","DELETE /users/{userid}",{"color":"#ff7f0e"}],
+                  ["${AWS::StackName}/UsersAPI","AuthorizationFailure","Operation","PUT /users/{userid}",{"color":"#ff7f0e","id":"m1"}],
+                  ["${AWS::StackName}/UsersAPI","ValidationError","Operation","POST /users",{"color":"#bcbd22"}]
                 ],
                 "period": 300, "stat": "Sum", "view": "timeSeries"
               }
@@ -324,3 +353,7 @@ Outputs:
   Dashboard:
     Description: CloudWatch Dashboard URL
     Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home#dashboards:name=${AWS::StackName}-Dashboard"
+
+  AlarmNotificationTopic:
+    Description: SNS Topic ARN for alarm notifications (subscribe your email here)
+    Value: !Ref AlarmNotificationTopic
